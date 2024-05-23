@@ -1,4 +1,5 @@
 import numpy as np
+import joblib
 
 from keras.preprocessing.text import Tokenizer
 from keras.preprocessing.sequence import pad_sequences
@@ -62,3 +63,48 @@ model.fit(train_data, train_labels_numeric, validation_split=0.2, epochs=10, bat
 loss, accuracy = model.evaluate(test_data, test_labels_numeric)
 print("Test Loss:", loss)
 print("Test Accuracy:", accuracy)
+
+model.save('lstm_model.h5')
+
+## SVM
+
+np.random.seed(42)
+input_dim = train_vectors.shape[1]
+w = np.random.randn(input_dim)
+b = np.random.randn()
+
+epochs = 100
+lr = 0.10
+expanding_rate = 1
+retracting_rate = 2
+
+for _ in range(epochs):
+    i = np.random.randint(0, len(train_vectors))
+    x, y = train_vectors[i], train_labels_numeric[i]
+    y = 1 if y > 2 else -1 
+
+    ypred = np.dot(w, x) + b
+    if (ypred > 0 and y > 0) or (ypred < 0 and y < 0):
+        if ypred < 1 and ypred > -1:
+            w = w + x * y * lr * retracting_rate
+            b = b + y * lr * retracting_rate
+        else:
+            w = w * expanding_rate
+            b = b * expanding_rate
+    else:
+        w = w + x * y * lr * expanding_rate
+        b = b + y * lr * expanding_rate
+
+
+def predict(x):
+    ypred = np.dot(w, x) + b
+    return 1 if ypred > 0 else 0
+
+predictions = np.array([predict(x) for x in test_vectors])
+test_labels_binary = np.array([1 if y > 2 else 0 for y in test_labels_numeric])
+
+accuracy = np.mean(predictions == test_labels_binary)
+print(f'Accuracy: {accuracy * 100:.2f}%')
+
+svm_model = {'w': w, 'b': b}
+joblib.dump(svm_model, 'svm_model.joblib')
