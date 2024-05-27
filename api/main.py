@@ -6,17 +6,18 @@ import joblib
 from keras.models import load_model
 from db import create_connection
 from crud import (create_predictions_table, insert_prediction_table, get_sentences, get_prediction)
-from typing import Literal
-from sentence_transformers import SentenceTransformer, util
+from typing import Literal, List
+from sentence_transformers import SentenceTransformer
 from keras.preprocessing.text import Tokenizer
 from keras.preprocessing.sequence import pad_sequences
 from sklearn.metrics.pairwise import cosine_similarity
-from gensim.models import FastText
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 app = FastAPI()
 
 lstm_model = load_model('../models/lstm_model.h5')
 svm_model = joblib.load('../models/svm_model.joblib')
+fasttext_model = joblib.load('../models/fasttext_model.joblib')
 
 conn = create_connection()
 create_predictions_table(conn)
@@ -30,6 +31,12 @@ label_dict = {
     "surprise": 5
 }
 
+binary_label_mapping = {
+    0: "sadness",  # Let's assume class 0 is mapped to "sadness"
+    1: "joy"       # Let's assume class 1 is mapped to "joy"
+}
+reverse_label_dict = {v: k for k, v in label_dict.items()}
+
 class TweetInput(BaseModel):
     name: str
     tweet: str
@@ -38,22 +45,17 @@ class TweetInput(BaseModel):
 class SentenceInput(BaseModel):
     sentence: str
 
-class UserPredictionsResponse(BaseModel):
-    id: int
-    name: str
-    tweet: str
-    model: str
-    prediction: int
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
 
-def save_db(prediction):
-    username = prediction.get("name", {})
-    tweets = prediction.get("tweet", {})
-    model = prediction.get("model", {})
-    dt = [username, tweets, model]
-    insert_prediction_table(conn, dt)
+# def save_db(prediction):
+#     username = prediction.get("name", {})
+#     tweets = prediction.get("tweet", {})
+#     model = prediction.get("model", {})
+#     prediction_label = prediction.get("label", {})
+#     dt = (username, tweets, prediction_label, model)
+#     insert_prediction_table(conn, dt)
 
 tokenizer = Tokenizer()
 tokenizer.word_index = {key: int(value) for key, value in tokenizer.word_index.items()}
@@ -63,60 +65,62 @@ def preprocess_tweet(tweet):
     padded_sequence = pad_sequences(sequence, maxlen=66)
     return padded_sequence
 
-def compute_sentence_embedding(sentence):
-    sequences = tokenizer.texts_to_sequences([sentence])
-    padded_sequences = pad_sequences(sequences, maxlen=100)  # Adjust `maxlen` based on your model
-    embedding = model.predict(padded_sequences)
-    return embedding
+def preprocess_svm(tweet):
+ words = tweet.split()
+ return np.mean([fasttext_model.wv[word] for word in words if word in fasttext_model.wv] or [np.zeros(100)], axis=0)
+
+def get_similar_tweets(tweet: str, conn):
+    tweets = get_sentences(conn,tweet)
+    all_tweets = tweets
+    all_tweets.append(tweet)
+
+    vectorizer = TfidfVectorizer()
+    tfidf_matrix = vectorizer.fit_transform(all_tweets)
+
+    similarity_scores = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])[0]
+    
+
+    top_indices = np.argsort(similarity_scores)[::-1][:10]
+
+    similar_tweets = [tweets[i] for i in top_indices]
+    return similar_tweets
+
 
 @app.post('/predict/')
-def predict(input_data: TweetInput):
-    if input_data.model == 'lstm':
-        lstm_sequence = preprocess_tweet(input_data.tweet)
+def predict(data: TweetInput):
+    if data.model == 'lstm':
+        lstm_sequence = preprocess_tweet(data.tweet)
         lstm_prediction = lstm_model.predict(lstm_sequence)
-        lstm_label = np.argmax(lstm_prediction)
-        # lstm_label = label_dict[lstm_label]
-        return lstm_label
-    elif input_data.model == 'svm':
-        svm_sequence = np.mean([lstm_model.wv[word] for word in input_data.tweet.split() if word in lstm_model.wv] or [np.zeros(100)], axis=0)
+        lstm_label = int(np.argmax(lstm_prediction)) 
+        print(lstm_label)
+        label_name = binary_label_mapping[lstm_label]
+        dt= (data.name,data.tweet, lstm_label, data.model)
+        insert_prediction_table(conn, dt)
+        return {"label": lstm_label, "label_name": label_name}
+    elif data.model == 'svm':
+        svm_sequence = preprocess_svm(data.tweet)
         svm_prediction = 1 if np.dot(svm_model['w'], svm_sequence) + svm_model['b'] > 0 else 0
-        # svm_prediction = label_dict[svm_prediction]
-        return svm_prediction
-
+        label_name = binary_label_mapping[svm_prediction]
+        dt= (data.name,data.tweet, svm_prediction, data.model)
+        insert_prediction_table(conn, dt)
+        return {"label": svm_prediction, "label_name": label_name}
     else:
         raise HTTPException(status_code=400, detail="Invalid model selected")
 
-@app.get("/user_predictions/")
-def user_predictions(name):
-    predictions = get_prediction(conn, name)
-    if not predictions is None:
-        raise HTTPException(status_code=404, detail="User not found or no predictions available")
-    return predictions
+@app.get('/past_prediction/')
+def get_user_predictions(name: str):
+    past_prediction_data = get_prediction(conn,name)
+    return past_prediction_data
 
 
-@app.post("/find_similar/")
+@app.get("/find_similar/")
 
-def similar_sentences(input_data: SentenceInput):
-    df = get_sentences(conn)
-    conn.close()
-
-    new_embedding = model.encode(input_data.sentence)
-
-    sentence_embeddings = model.encode(df['sentence'].tolist())
-
-    similarities = cosine_similarity(new_embedding, sentence_embeddings)
-
-    top_indices = similarities.argsort(descending=True)[:10]
-    similar_sentences = df.iloc[top_indices]
-
-    similar_sentences_list = []
-    for index, row in similar_sentences.iterrows():
-        similar_sentences_list.append({
-            "sentence": row['sentence'],
-            "similarity_score": similarities[index].item()
-        })
-
-    return similar_sentences_list
+def find_similar_tweets(tweet: str):
+    similar_tweets = get_similar_tweets(tweet, conn)
+    if not similar_tweets:
+        return ["No similar tweets found."]
+    else:
+        return similar_tweets
 
 
 

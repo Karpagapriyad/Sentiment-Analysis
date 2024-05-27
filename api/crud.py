@@ -2,12 +2,12 @@ from db import create_connection
 from psycopg2 import sql
 import pandas as pd
 
-def create_predictions_table(conn, table_name="prediction"):
+def create_predictions_table(conn):
     cursor = conn.cursor()
     create_table_query = f"""
-    CREATE TABLE IF NOT EXISTS {table_name} (
+    CREATE TABLE IF NOT EXISTS prediction(
         id SERIAL PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
+        username TEXT NOT NULL,
         tweets TEXT NOT NULL,
         prediction INT NOT NULL,
         model_choice TEXT NOT NULL
@@ -30,20 +30,22 @@ def insert_prediction_table(conn, prediction):
     cursor.close()
 
 
-def get_sentences(conn):
+def get_sentences(conn,tweet):
     cursor = conn.cursor()
     get_data = f"""
-    SELECT tweeets FROM prediction;
+    SELECT tweets FROM prediction;
 """
-    cursor.execute(get_data)
-    df = pd.read_sql(get_data, conn)
-    return df
+    cursor.execute(get_data,(tweet))
+    tweets = [row[0] for row in cursor.fetchall()]
+    return tweets
+
 
 def get_prediction(conn, name):
     cursor = conn.cursor()
-    get_data = f"""
-    SELECT * FROM prediction WHERE username = 'name';
+    get_data_name = """
+    SELECT id, username, tweets, prediction, model_choice FROM prediction WHERE username = %s;
     """
-    cursor.execute(get_data)
-    df = pd.read_sql(get_data, conn, params=(name,))
-    return df
+    cursor.execute(get_data_name, (name,))
+    rows = cursor.fetchall()
+    cursor.close()
+    return rows
